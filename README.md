@@ -1,45 +1,77 @@
-# ChopShop: Automated After Effects Rendering Pipeline
+# <img src="image_2.png" width="48" valign="middle" alt="ChopShop Logo"> ChopShop: Headless Template Injector
 
-## Setup Instructions
+> **Automated, Zero-UI Data Injection and Rendering for Video Design Systems**
 
-### 1. Install the Local Engine
-Clone this repository to your Mac, open Terminal in the folder, and run the install script:
+`ChopShop` is a lightweight, headless macOS background service that powers automated template injection. It listens securely to network-based JSON queue payloads, dynamically injecting text, variables, and assets straight into native After Effects `.aep` project files without bothering the local editor.
+
+This repository hosts the background daemon (`daemon_core.js`), local bootstrapper (`bootstrap.js`), and render engine (`chopshop.js`). Together they safely handle:
+- 🔄 Background queue polling from Cloudflare KV & Slack API
+- 🔒 Secure, in-memory payload isolation to fight command exploits
+- 📦 Automatic project/dependency workspace sandboxing (no sync collisions)
+- 🖥️ Background After Effects rendering (`aerender` / macOS script bridges)
+
+*Note: Companion front-end Panels (Premiere, After Effects, Slack UI) are managed in separate, internal repositories.*
+
+---
+
+## 🚀 Setup & Installation
+
+### 📋 Prerequisites
+- **macOS** with Node.js installed (`node -v` 18+)
+- **Adobe After Effects** installed in `/Applications`
+- Access to your design system's Cloudflare Worker / API endpoint
+
+---
+
+### 📥 1. Create the Local Environment
+Clone this repository to your computer, navigate to the folder in Terminal, and run our simple setup script:
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
+*This safely configures `~/.chopshop_local/` (using 0700 permissions) and clones the bootstrap loader.*
 
-*This creates a hidden `~/.chopshop_local` folder on your Mac and copies the necessary bootstrapper into it.*
+---
 
-### 2. Configure Environment Variables
-Navigate to the hidden folder and update your configuration:
-1. In Terminal, run: `open ~/.chopshop_local`
-2. Open the `.env` file in any text editor.
-3. Replace the placeholder URL with your actual Cloudflare Worker URL.
+### ⚙️ 2. Configure Your Variables
+Navigate to your local hidden config directory and link the app to your endpoint:
+1. Run `open ~/.chopshop_local` in Terminal.
+2. Open `.env` in any code or text editor.
+3. Replace the fallback URL with your system's `WORKER_URL`.
 
-### 3. Build the macOS App (Gatekeeper-Safe)
-To run ChopShop securely in the background without triggering macOS security warnings, compile it locally using Automator:
-1. Open the **Automator** app on your Mac (in `/Applications`).
-2. Click **New Document** and select **Application**.
-3. In the search bar on the top left, type `Run Shell Script` and drag that action into the main workflow window on the right.
-4. Paste the following command into the text box (adjust the path if you use Homebrew or NVM for Node):
+```env
+WORKER_URL=[https://your-unique-subdomain.workers.dev](https://your-unique-subdomain.workers.dev)
+CHOPSHOP_ROOT=/Users/yourname/Documents/Templates_Shared
+```
+
+---
+
+### 🔨 3. Create the Local Background App
+Since this is an automated, headless tool, compiling it through Automator is the easiest way to avoid gatekeeper or quarantine blocks:
+
+1. Open **Automator** (`/Applications/Automator.app`).
+2. Choose **Application** for the new document type.
+3. Search for **Run Shell Script** on the left and drag it into the right-hand panel.
+4. Replace `cat` in the input field with the execution line below:
 
    ```bash
    /usr/local/bin/node ~/.chopshop_local/bootstrap.js
    ```
 
-5. Go to **File > Save**, name it `ChopShop`, and save it to your `Applications` folder.
+5. Go to **File > Save**, name the app `ChopShop`, and place it inside your standard `/Applications` directory.
 
-### 4. (Optional) Run Silently in the Background
-To prevent the app from showing a bouncing icon in your Dock while it renders:
-1. Right-click your new `ChopShop.app` in Finder and select **Show Package Contents**.
-2. Open `Contents/Info.plist` in a text editor.
-3. Just above the bottom `</dict>` tag, paste these two lines:
+---
+
+### 🕵️ 4. Optional: Silently Hide the Icon (Recommended)
+To prevent the application from bouncing in your Dock while it's scanning the queue:
+1. Right-click your new `ChopShop.app` in your Applications folder and click **Show Package Contents**.
+2. Open `Contents/Info.plist` with a text editor.
+3. Insert this key/value pair right above the final `</dict>` tag at the bottom of the file:
 
    ```xml
    <key>LSUIElement</key>
    <true/>
    ```
 
-4. Save the file and launch ChopShop!
+4. Save and launch your background engine!
