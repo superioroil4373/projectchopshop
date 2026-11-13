@@ -1,4 +1,4 @@
-# <img src="icon.png" width="128" valign="middle" alt="ChopShop Logo"> ChopShop: Headless Template Injector
+ChopShop: Headless Template Injector
 
 > **Automated, Zero-UI Data Injection and Rendering for Video Design Systems**
 
