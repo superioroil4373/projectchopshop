@@ -1,22 +1,61 @@
 #!/bin/bash
-echo "🎬 Installing ChopShop Local Environment..."
+echo "⚡️ Installing ChopShop Background Daemon..."
 
-# 1. Create the secure hidden directory
-ENGINE_DIR="$HOME/.chopshop_local"
-mkdir -p "$ENGINE_DIR"
-chmod 700 "$ENGINE_DIR"
+PLIST_NAME="com.chopshop.daemon.plist"
+LOCAL_DIR="$HOME/.chopshop_local"
 
-# 2. Copy the bootstrapper 
-cp src/bootstrap.js "$ENGINE_DIR/bootstrap.js"
-chmod 600 "$ENGINE_DIR/bootstrap.js"
+# 1. Create hidden local directory
+mkdir -p "$LOCAL_DIR"
+chmod 700 "$LOCAL_DIR"
 
-# 3. Handle the environment variables
-if [ ! -f "$ENGINE_DIR/.env" ]; then
-    cp .env.example "$ENGINE_DIR/.env"
-    echo "✅ Created .env template in $ENGINE_DIR/.env"
-    echo "⚠️  Action Required: Please open $ENGINE_DIR/.env and add your WORKER_URL."
-else
-    echo "✅ Existing .env found, skipping template copy."
+# 2. Handle the environment variables (Ask user to provide their own GCP key)
+if [ ! -f "$LOCAL_DIR/chopshop-daemon-key.json" ]; then
+    echo "⚠️  Action Required: Please place your GCP Service Account JSON in $LOCAL_DIR/chopshop-daemon-key.json"
 fi
 
-echo "🚀 Install complete! Follow the README to create your Automator app."
+# 3. Install the Binary
+echo "-> Installing daemon executable..."
+if [ -f "chopshop-daemon" ]; then
+    cp chopshop-daemon "$LOCAL_DIR/"
+    chmod +x "$LOCAL_DIR/chopshop-daemon"
+else
+    echo "⚠️  Binary not found! Please compile daemon_core.js using pkg first."
+    exit 1
+fi
+
+# 4. Generate the launchd Background Service (.plist)
+echo "-> Configuring macOS background service..."
+cat << INNER_EOF > "$HOME/Library/LaunchAgents/$PLIST_NAME"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chopshop.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$LOCAL_DIR/chopshop-daemon</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GOOGLE_APPLICATION_CREDENTIALS</key>
+        <string>$LOCAL_DIR/chopshop-daemon-key.json</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/chopshop-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/chopshop-daemon.err</string>
+</dict>
+</plist>
+INNER_EOF
+
+# 5. Load and start the service invisibly
+echo "-> Starting service..."
+launchctl unload "$HOME/Library/LaunchAgents/$PLIST_NAME" 2>/dev/null
+launchctl load "$HOME/Library/LaunchAgents/$PLIST_NAME"
+
+echo "✅ ChopShop Daemon installed and running in the background!"
