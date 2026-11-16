@@ -1,0 +1,14 @@
+# Secrets and Credentials
+.env
+chopshop-daemon-key.json
+*key.json
+*.pem
+
+# Compiled Binaries
+chopshop-daemon
+chopshop-daemon-arm64
+chopshop-daemon-x64
+*.exe
+
+# macOS System Files
+.DS_Store
