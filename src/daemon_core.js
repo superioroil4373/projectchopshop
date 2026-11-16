@@ -4,21 +4,31 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync, execFileSync } = require('child_process');
 
-// SANITIZED: Use environment variables for sensitive URLs
-const WORKER_URL = process.env.WORKER_URL || "https://your-worker-url.workers.dev";
-const LOCAL_USER = os.userInfo().username.toLowerCase();
+// 1. Initialize configuration and paths BEFORE loading Google Cloud SDKs (prevents pkg TDZ errors)
+const ENGINE_DIR = path.join(os.homedir(), '.chopshop_local');
+const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || 'your-gcp-project-id';
+const SUBSCRIPTION_NAME = process.env.PUBSUB_SUBSCRIPTION || 'chopshop-mac-daemon';
+const KEY_FILENAME = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(ENGINE_DIR, 'chopshop-daemon-key.json');
 
-// SANITIZED: Replaced hardcoded Box path with an environment variable fallback
+const WORKER_URL = process.env.WORKER_URL || 'https://your-worker-url.workers.dev';
+const LOCAL_USER = os.userInfo().username.toLowerCase();
 const CHOPSHOP_ROOT = process.env.CHOPSHOP_ROOT || path.join(
     os.homedir(),
-    'Documents/ChopShop_Templates' // Generic placeholder for public users
+    'Documents/ChopShop_Templates'
 );
 
-const ENGINE_DIR = path.join(os.homedir(), '.chopshop_local');
+process.env.GOOGLE_APPLICATION_CREDENTIALS = KEY_FILENAME;
 
 if (!fs.existsSync(ENGINE_DIR)) {
     fs.mkdirSync(ENGINE_DIR, { recursive: true, mode: 0o700 });
 }
+
+// 2. Load GCP clients after environment initialization
+const { PubSub } = require('@google-cloud/pubsub');
+const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+
+const pubsub = new PubSub({ projectId: GCP_PROJECT_ID });
+const secretClient = new SecretManagerServiceClient({ projectId: GCP_PROJECT_ID });
 
 function getMachineHash() {
     try {
@@ -29,88 +39,119 @@ function getMachineHash() {
     }
 }
 
-async function fetchLatestEngine() {
+async function getSigningSecret() {
+    const secretPath = `projects/${GCP_PROJECT_ID}/secrets/ENGINE_SIGNING_SECRET/versions/latest`;
+    const [version] = await secretClient.accessSecretVersion({ name: secretPath });
+    return version.payload.data.toString('utf8').trim();
+}
+
+function verifySignature(payload, signatureHex, secret) {
+    if (!signatureHex || typeof signatureHex !== 'string') return false;
+
+    const expectedHex = crypto
+        .createHmac('sha256', secret)
+        .update(payload, 'utf8')
+        .digest('hex');
+
+    const sigBuf = Buffer.from(signatureHex, 'hex');
+    const expBuf = Buffer.from(expectedHex, 'hex');
+
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+}
+
+async function fetchVerifiedEngine() {
     const hash = getMachineHash();
     const url = `${WORKER_URL}/?hash=${hash}&user=${encodeURIComponent(LOCAL_USER)}`;
     const res = await fetch(url);
+
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`Engine update failed (${res.status}): ${err}`);
+        throw new Error(`Engine fetch failed (${res.status}): ${err}`);
     }
-    return await res.text();
+
+    const engineCode = await res.text();
+    const signature = res.headers.get('X-Engine-Signature');
+    const signingSecret = await getSigningSecret();
+
+    if (!verifySignature(engineCode, signature, signingSecret)) {
+        throw new Error('SECURITY ALERT: Engine payload HMAC-SHA256 signature verification failed.');
+    }
+
+    return engineCode;
 }
 
-async function pollQueue() {
-    const url = `${WORKER_URL}/slack/queue?user=${encodeURIComponent(LOCAL_USER)}&_t=${Date.now()}`;
-    const response = await fetch(url, { cache: 'no-store' });
-    
-    if (response.status === 200) {
-        const rawText = await response.text();
-        if (!rawText) return;
-        
+function startDaemon() {
+    const subscription = pubsub.subscription(SUBSCRIPTION_NAME);
+    console.log(`[ChopShop Daemon] Listening via StreamingPull on ${SUBSCRIPTION_NAME} for user: ${LOCAL_USER}...`);
+
+    subscription.on('message', async (message) => {
         let job;
         try {
+            const rawText = message.data.toString('utf8');
             job = JSON.parse(rawText);
-        } catch (jsonErr) {
-            console.warn(`[Slack Daemon] Received malformed payload, ignoring.`);
+        } catch {
+            console.warn(`[ChopShop Daemon] Received malformed JSON payload (${message.id}), discarding.`);
+            message.ack();
             return;
         }
-        
+
         const templateKey = job.template || job.category;
-        
-        if (job && templateKey) {
-            console.log(`[Slack Daemon] Received render job: ${templateKey}`);
-
-            const secureJobId = crypto.randomUUID();
-            const ephemeralEnginePath = path.join(ENGINE_DIR, `chopshop_${secureJobId}.js`);
-            
-            try {
-                const engineCode = await fetchLatestEngine();
-                fs.writeFileSync(ephemeralEnginePath, engineCode, { encoding: 'utf8', mode: 0o600 });
-
-                const normalizedPayload = {
-                    ...job,
-                    category: templateKey,
-                    template: templateKey
-                };
-
-                const envWithWorker = { 
-                    ...process.env, 
-                    WORKER_URL: WORKER_URL,
-                    CHOPSHOP_ROOT: CHOPSHOP_ROOT,
-                    CHOPSHOP_PAYLOAD: JSON.stringify(normalizedPayload)
-                };
-
-                execFileSync(process.execPath, [ephemeralEnginePath], { 
-                    stdio: 'inherit', 
-                    env: envWithWorker,
-                    cwd: CHOPSHOP_ROOT 
-                });
-
-            } finally {
-                if (fs.existsSync(ephemeralEnginePath)) {
-                    fs.unlinkSync(ephemeralEnginePath);
-                }
-            }
+        if (!job || !templateKey) {
+            console.warn(`[ChopShop Daemon] Payload missing template/category (${message.id}), discarding.`);
+            message.ack();
+            return;
         }
-    }
-}
 
-async function startDaemon() {
-    console.log(`[ChopShop Daemon] Polling Slack queue for user: ${LOCAL_USER} (1.5s intervals)`);
-    
-    while (true) {
+        console.log(`[ChopShop Daemon] Received render job (${message.id}): ${templateKey}`);
+
+        const secureJobId = crypto.randomUUID();
+        const ephemeralEnginePath = path.join(ENGINE_DIR, `chopshop_${secureJobId}.js`);
+
         try {
-            await pollQueue();
-            await new Promise(resolve => setTimeout(resolve, 1500));
-        } catch (e) {
-            if (!e.message?.includes('fetch failed')) {
-                console.error(`[Slack Daemon Error]`, e.message);
+            // 1. Fetch engine payload from Worker & verify HMAC signature via Secret Manager
+            const engineCode = await fetchVerifiedEngine();
+
+            // 2. Write verified engine ephemerally with strict owner-only permissions
+            fs.writeFileSync(ephemeralEnginePath, engineCode, { encoding: 'utf8', mode: 0o600 });
+
+            const normalizedPayload = {
+                ...job,
+                category: templateKey,
+                template: templateKey
+            };
+
+            const envWithWorker = {
+                ...process.env,
+                WORKER_URL: WORKER_URL,
+                CHOPSHOP_ROOT: CHOPSHOP_ROOT,
+                CHOPSHOP_PAYLOAD: JSON.stringify(normalizedPayload)
+            };
+
+            // 3. Execute isolated render pipeline
+            execFileSync(process.execPath, [ephemeralEnginePath], {
+                stdio: 'inherit',
+                env: envWithWorker,
+                cwd: CHOPSHOP_ROOT
+            });
+
+            // 4. Acknowledge successful completion
+            message.ack();
+            console.log(`[ChopShop Daemon] Job ${message.id} completed and acknowledged.`);
+        } catch (err) {
+            console.error(`[ChopShop Daemon] Job ${message.id} failed:`, err.message);
+            // Acknowledge on failure to prevent infinite Pub/Sub retry loops
+            message.ack();
+        } finally {
+            if (fs.existsSync(ephemeralEnginePath)) {
+                fs.unlinkSync(ephemeralEnginePath);
             }
-            console.log(`[ChopShop Daemon] Backing off for 15 seconds due to error...`);
-            await new Promise(resolve => setTimeout(resolve, 15000));
         }
-    }
+    });
+
+    subscription.on('error', (error) => {
+        console.error('[ChopShop Daemon] Pub/Sub stream error:', error.message);
+    });
 }
 
 startDaemon();
