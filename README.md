@@ -1,77 +1,57 @@
-ChopShop: Headless Template Injector
+# ChopShop: Secure Asynchronous Architecture
 
-> **Automated, Zero-UI Data Injection and Rendering for Video Design Systems**
+> **Automated, Cryptographically Verified Data Injection and Rendering for Video Design Systems**
 
-`ChopShop` is a lightweight, headless macOS background service that powers automated template injection. It listens securely to network-based JSON queue payloads, dynamically injecting text, variables, and assets straight into native After Effects `.aep` project files without bothering the local editor.
+`ChopShop` is a hardened, headless macOS background service that powers automated After Effects template injection. It operates on a zero-trust model—pulling jobs from GCP Pub/Sub, dynamically verifying payloads with HMAC-SHA256 signatures, and executing renders invisibly in the background via macOS `launchd`.
 
-This repository hosts the background daemon (`daemon_core.js`), local bootstrapper (`bootstrap.js`), and render engine (`chopshop.js`). Together they safely handle:
-- 🔄 Background queue polling from Cloudflare KV & Slack API
-- 🔒 Secure, in-memory payload isolation to fight command exploits
-- 📦 Automatic project/dependency workspace sandboxing (no sync collisions)
-- 🖥️ Background After Effects rendering (`aerender` / macOS script bridges)
+This repository hosts the sanitized background daemon (`daemon_core.js`), the render engine (`chopshop.js`), and the zero-touch deployment script (`install.sh`).
 
-*Note: Companion front-end Panels (Premiere, After Effects, Slack UI) are managed in separate, internal repositories.*
+![ChopShop Architecture Diagram](./chopshop-architecture.png)
 
 ---
 
-## 🚀 Setup & Installation
+## 🏗️ Architecture Overview
+
+1. **Client Trigger (Slack):** A designer triggers a render command via Slack.
+2. **Webhook Ingest (GCP Cloud Functions):** Validates Slack's HMAC signature, sanitizes user inputs, and publishes the job payload to the queue.
+3. **Job Queue (GCP Pub/Sub):** Decouples Slack from rendering and prevents runaway retry loops via explicit message acknowledgments.
+4. **Signed Payload Delivery (Cloudflare Worker):** Validates the requesting machine's hardware hash against Google Sheets, pulls the latest render engine from GitHub, and signs the payload using `ENGINE_SIGNING_SECRET`.
+5. **Background Execution (macOS Daemon):** A dependency-free `pkg` binary running via `launchd` in `~/.chopshop_local/`. It fetches `ENGINE_SIGNING_SECRET` from GCP Secret Manager, verifies the payload signature, executes the After Effects render in an isolated sandbox, syncs outputs to Box, and posts a completion update back to Slack.
+
+---
+
+## 🚀 Setup & Compilation
 
 ### 📋 Prerequisites
-- **macOS** with Node.js installed (`node -v` 18+)
-- **Adobe After Effects** installed in `/Applications`
-- Access to your design system's Cloudflare Worker / API endpoint
+- **macOS** with Adobe After Effects installed in `/Applications`
+- **Node.js 18+** (required on the build machine only)
+- **GCP Project** with Cloud Functions, Pub/Sub, and Secret Manager configured
 
----
+### 🔨 1. Compile the Daemon Binary
+Bundle `daemon_core.js` into standalone macOS executables so end-users do not need Node.js or `npm` installed:
 
-### 📥 1. Create the Local Environment
-Clone this repository to your computer, navigate to the folder in Terminal, and run our simple setup script:
+```bash
+npm install -g pkg
+npx pkg daemon_core.js --target node18-macos-arm64,node18-macos-x64 --output chopshop-daemon
+```
+
+### 📥 2. Zero-Touch Team Deployment
+Package the compiled binary (`chopshop-daemon`), your GCP Service Account JSON (`chopshop-daemon-key.json`), and `install.sh` into a ZIP archive for your team.
+
+Designers install the service without administrator (`sudo`) privileges by running:
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
-*This safely configures `~/.chopshop_local/` (using 0700 permissions) and clones the bootstrap loader.*
+
+This installs the files to `~/.chopshop_local/` with restricted permissions (`0700`/`0600`) and registers `com.chopshop.daemon` with macOS `launchd` so it starts automatically on login.
 
 ---
 
-### ⚙️ 2. Configure Your Variables
-Navigate to your local hidden config directory and link the app to your endpoint:
-1. Run `open ~/.chopshop_local` in Terminal.
-2. Open `.env` in any code or text editor.
-3. Replace the fallback URL with your system's `WORKER_URL`.
+## 🔒 Security & Resilience
 
-```env
-WORKER_URL=[https://your-unique-subdomain.workers.dev](https://your-unique-subdomain.workers.dev)
-CHOPSHOP_ROOT=/Users/yourname/Documents/Templates_Shared
-```
-
----
-
-### 🔨 3. Create the Local Background App
-Since this is an automated, headless tool, compiling it through Automator is the easiest way to avoid gatekeeper or quarantine blocks:
-
-1. Open **Automator** (`/Applications/Automator.app`).
-2. Choose **Application** for the new document type.
-3. Search for **Run Shell Script** on the left and drag it into the right-hand panel.
-4. Replace `cat` in the input field with the execution line below:
-
-   ```bash
-   /usr/local/bin/node ~/.chopshop_local/bootstrap.js
-   ```
-
-5. Go to **File > Save**, name the app `ChopShop`, and place it inside your standard `/Applications` directory.
-
----
-
-### 🕵️ 4. Optional: Silently Hide the Icon (Recommended)
-To prevent the application from bouncing in your Dock while it's scanning the queue:
-1. Right-click your new `ChopShop.app` in your Applications folder and click **Show Package Contents**.
-2. Open `Contents/Info.plist` with a text editor.
-3. Insert this key/value pair right above the final `</dict>` tag at the bottom of the file:
-
-   ```xml
-   <key>LSUIElement</key>
-   <true/>
-   ```
-
-4. Save and launch your background engine!
+- **No Hardcoded Secrets:** Cryptographic keys (`ENGINE_SIGNING_SECRET`) are retrieved dynamically at runtime from GCP Secret Manager.
+- **Cryptographic Verification:** The macOS daemon verifies the `X-Engine-Signature` header (HMAC-SHA256) before executing any engine code.
+- **Permissionless User-Space Install:** Runs entirely within `~/.chopshop_local/`, avoiding system directory modifications or `sudo` prompts.
+- **Loop Protection:** Explicit Pub/Sub message acknowledgments and delivery attempt limits prevent failed jobs from triggering infinite retry loops.
